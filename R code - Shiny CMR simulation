@@ -1,0 +1,295 @@
+# Run all this code at once in R. It will call a shiny application where you can do some basic CMR simulations. 
+
+
+set.seed(687398) # Add a random number, in different files if you want to have a reproduction somewhere else. 
+# remove this if you want to randomize it from the first time
+
+# Function to check and install missing packages
+packages <- c("shiny", "DT")
+
+# Loop through the list and install missing packages
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Define the UI
+ui <- fluidPage(
+  titlePanel("Capture-Mark-Recapture Estimators"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      radioButtons("estimator", "Choose Estimator:",
+                   choices = c("Jolly-Seber", "Petersen")),
+      
+      # Jolly-Seber inputs
+      conditionalPanel(
+        condition = "input.estimator == 'Jolly-Seber'",
+        numericInput("initial_population", "Initial Population Size:", value = 300, min = 1),
+        numericInput("captures", "Number of Captures per Event:", value = 30, min = 1),
+        numericInput("births", "Number of Births (Influx):", value = 10, min = 0),
+        numericInput("deaths", "Number of Deaths (Outflow):", value = 10, min = 0),
+        actionButton("run_simulation", "Trapping Time")
+      ),
+      
+      # Petersen inputs
+      conditionalPanel(
+        condition = "input.estimator == 'Petersen'",
+        numericInput("pop_size", "Actual Population Size:", 100, min = 1),
+        numericInput("marked_individuals", "Number of Marked Individuals:", 20, min = 1),
+        numericInput("sample_size", "Sample Size in Second Capture:", 30, min = 1),
+        actionButton("simulate", "Simulate")
+      )
+    ),
+    
+    mainPanel(
+      conditionalPanel(
+        condition = "input.estimator == 'Jolly-Seber'",
+        tabsetPanel(
+          tabPanel("Simulation Results",
+                   h3("Simulation Results"),
+                   tableOutput("results_table")
+          ),
+          
+          tabPanel("Capture Histories",
+                   h3("Sorted and Filtered Capture History Table"),
+                   DTOutput("sorted_table_output")
+          )
+        )
+      ),
+      
+      conditionalPanel(
+        condition = "input.estimator == 'Petersen'",
+        h3("Petersen Estimator Results:"),
+        tableOutput("results_table_petersen")
+      )
+    )
+  )
+)
+
+# Define the server logic
+server <- function(input, output) {
+  
+  observeEvent(input$run_simulation, {
+    if (input$estimator == "Jolly-Seber") {
+      # Jolly-Seber Simulation Logic (same as before)
+      initial_population <- input$initial_population
+      captures <- input$captures
+      births <- input$births
+      deaths <- input$deaths
+      capture_rounds <- 10
+      
+      potential_pop_size <- initial_population + (births * 20)
+      potential_population <- paste0("X", seq_len(potential_pop_size))
+      
+      ACTUAL_POP_SIZE <- potential_population[1:initial_population]
+      HUGE_TABLE <- data.frame(ID = ACTUAL_POP_SIZE, stringsAsFactors = FALSE)
+      for (i in 1:capture_rounds) {
+        HUGE_TABLE[[paste("Capture", i)]] <- 0
+      }
+      
+      next_birth_index <- initial_population + 1
+      actual_population_sizes <- numeric(capture_rounds)
+      
+      for (round in 1:capture_rounds) {
+        if (round > 1) {
+          if (length(ACTUAL_POP_SIZE) > deaths) {
+            death_ids <- sample(ACTUAL_POP_SIZE, size = deaths, replace = FALSE)
+            ACTUAL_POP_SIZE <- setdiff(ACTUAL_POP_SIZE, death_ids)
+          }
+          
+          new_birth_ids <- potential_population[next_birth_index:(next_birth_index + births - 1)]
+          next_birth_index <- next_birth_index + births
+          ACTUAL_POP_SIZE <- c(ACTUAL_POP_SIZE, new_birth_ids)
+          
+          new_rows <- data.frame(ID = new_birth_ids, stringsAsFactors = FALSE)
+          for (i in 1:capture_rounds) {
+            new_rows[[paste("Capture", i)]] <- 0
+          }
+          HUGE_TABLE <- rbind(HUGE_TABLE, new_rows)
+        }
+        
+        CAPTURED_ID_VECTOR <- sample(ACTUAL_POP_SIZE, size = captures, replace = FALSE)
+        HUGE_TABLE[[paste("Capture", round)]] <- ifelse(HUGE_TABLE$ID %in% CAPTURED_ID_VECTOR, 1, 0)
+        
+        actual_population_sizes[round] <- length(ACTUAL_POP_SIZE)
+      }
+      
+      row_sums <- rowSums(HUGE_TABLE[, -1])
+      filtered_table <- HUGE_TABLE[row_sums > 0, ]
+      
+      filtered_table$Encoding <- apply(filtered_table[, -1], 1, paste0, collapse = "")
+      sorted_table <- filtered_table[order(-as.numeric(filtered_table$Encoding)), ]
+      
+      sorted_table <- sorted_table[, -ncol(sorted_table)]
+      
+      capture_matrix <- as.matrix(sorted_table[, -1])
+      capture_matrix <- as.data.frame(capture_matrix)
+      capture_matrix[, -1] <- apply(capture_matrix[, -1], 2, as.numeric)
+      
+      capture_sums_per_column <- colSums(capture_matrix)
+      new_individuals <- numeric(ncol(capture_matrix))
+      
+      for (i in 1:ncol(capture_matrix)) {
+        if (i == 1) {
+          new_individuals[i] <- sum(capture_matrix[, i])
+        } else if (i == 2) {
+          previous_captures <- capture_matrix[, 1]
+          new_individuals[i] <- sum(capture_matrix[, i] == 1 & previous_captures == 0)
+        } else {
+          previous_captures <- rowSums(capture_matrix[, 1:(i - 1)])
+          new_individuals[i] <- sum(capture_matrix[, i] == 1 & previous_captures == 0)
+        }
+      }
+      
+      marked_individuals <- capture_sums_per_column - new_individuals
+      recaptured_individuals <- numeric(ncol(capture_matrix))
+      
+      for (i in 1:ncol(capture_matrix)) {
+        for (j in 1:nrow(capture_matrix)) {
+          if (capture_matrix[j, i] == 1 && i < ncol(capture_matrix)) {
+            if (sum(capture_matrix[j, (i + 1):ncol(capture_matrix)]) > 0) {
+              recaptured_individuals[i] <- recaptured_individuals[i] + 1
+            }
+          }
+        }
+      }
+      
+      marked_but_missed <- numeric(ncol(capture_matrix))
+      
+      for (i in 1:ncol(capture_matrix)) {
+        for (j in 1:nrow(capture_matrix)) {
+          if (capture_matrix[j, i] == 0 && i > 1 && i < ncol(capture_matrix)) {
+            previous_captures <- sum(capture_matrix[j, 1:(i - 1)]) > 0
+            future_captures <- sum(capture_matrix[j, (i + 1):ncol(capture_matrix)]) > 0
+            if (previous_captures && future_captures) {
+              marked_but_missed[i] <- marked_but_missed[i] + 1
+            }
+          }
+        }
+      }
+      
+      M <- numeric(ncol(capture_matrix))
+      for (i in 1:ncol(capture_matrix)) {
+        if (recaptured_individuals[i] > 0) {
+          M[i] <- ((capture_sums_per_column[i] * marked_but_missed[i]) / recaptured_individuals[i]) + marked_individuals[i]
+        } else {
+          M[i] <- NA
+        }
+      }
+      
+      N <- numeric(ncol(capture_matrix))
+      for (i in 1:ncol(capture_matrix)) {
+        if (marked_individuals[i] > 0) {
+          N[i] <- (capture_sums_per_column[i] * M[i]) / marked_individuals[i]
+        } else {
+          N[i] <- NA
+        }
+      }
+      
+      Phi <- numeric(ncol(capture_matrix) - 1)
+      B <- numeric(ncol(capture_matrix) - 1)
+      
+      for (i in 1:(ncol(capture_matrix) - 1)) {
+        if (!is.na(M[i + 1]) && !is.na(M[i]) && (M[i] + (capture_sums_per_column[i] - marked_individuals[i])) != 0) {
+          Phi[i] <- M[i + 1] / (M[i] + (capture_sums_per_column[i] - marked_individuals[i]))
+        } else {
+          Phi[i] <- NA
+        }
+        
+        if (!is.na(N[i + 1]) && !is.na(Phi[i]) && !is.na(N[i])) {
+          B[i] <- N[i + 1] - (Phi[i] * N[i])
+        } else {
+          B[i] <- NA
+        }
+      }
+      
+      results_table <- data.frame(
+        Capture_Session = 1:ncol(capture_matrix),
+        n = capture_sums_per_column,
+        u = new_individuals,
+        m = marked_individuals,
+        r = recaptured_individuals,
+        z = marked_but_missed,
+        M = M,
+        N = N,
+        Phi = c(Phi, NA),
+        B = c(B, NA),
+        `Real Population Size` = actual_population_sizes
+      )
+      
+      # Output for the Simulation Results table
+      output$results_table <- renderTable({
+        results_table
+      })
+      
+      # Output for the Sorted Capture Table with formatting
+      output$sorted_table_output <- renderDT({
+        datatable(sorted_table, options = list(dom = 't', paging = FALSE), rownames = FALSE) %>%
+          formatStyle(
+            names(sorted_table), 
+            backgroundColor = styleEqual(c(1), 'red'),
+            fontWeight = styleEqual(c(1), 'bold')
+          )
+      })
+    }
+  })
+  
+  # Petersen Estimator
+  values <- reactiveValues()
+  values$results <- data.frame(PopulationSize = numeric(0),
+                               MarkedIndividuals = numeric(0),
+                               SampleSize = numeric(0),
+                               Recaptured = numeric(0),
+                               EstimatedPopulation = numeric(0),
+                               StandardError = numeric(0),
+                               stringsAsFactors = FALSE)
+  
+  observeEvent(input$simulate, {
+    if (input$estimator == "Petersen") {
+      population_size <- input$pop_size
+      marked_individuals <- input$marked_individuals
+      sample_size <- input$sample_size
+      
+      if(marked_individuals > population_size) {
+        showNotification("Number of marked individuals cannot exceed the population size.", type = "error")
+      } else if(sample_size > population_size) {
+        showNotification("Sample size cannot exceed the population size.", type = "error")
+      } else {
+        population <- c(rep(1, marked_individuals), rep(0, population_size - marked_individuals))
+        sample <- sample(population, size = sample_size, replace = FALSE)
+        
+        recaptured <- sum(sample)
+        
+        if(recaptured > 0) {
+          N_hat <- (marked_individuals * sample_size) / recaptured
+          
+          SE_N <- sqrt(((marked_individuals + 1) * (sample_size + 1) * (marked_individuals - recaptured) * (sample_size - recaptured)) / 
+                         (((recaptured + 1)^2) * (recaptured + 2)))
+          
+          new_row <- data.frame(PopulationSize = population_size,
+                                MarkedIndividuals = marked_individuals,
+                                SampleSize = sample_size,
+                                Recaptured = recaptured,
+                                EstimatedPopulation = round(N_hat, 2),
+                                StandardError = round(SE_N, 2),
+                                stringsAsFactors = FALSE)
+          
+          values$results <- rbind(values$results, new_row)
+        } else {
+          showNotification("Recapture was 0, cannot estimate population size.", type = "warning")
+        }
+      }
+    }
+  })
+  
+  # Output the results table for Petersen
+  output$results_table_petersen <- renderTable({
+    values$results
+  })
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
